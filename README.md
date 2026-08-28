@@ -5,7 +5,58 @@ version handling plus a local, extensible agent-configuration flow. It does not
 model specs, changes, schemas, planning workflows, telemetry, upgrades, or remote
 skill installation.
 
-## Install and run
+## Install
+
+Every release ships the packed CLI as a GitHub Release asset, so it installs with no
+registry account and no clone.
+
+Install it on the machine — this URL always resolves to the newest release, and
+re-running the same command upgrades:
+
+```sh
+npm install -g https://github.com/johnatanunessouza/mio/releases/latest/download/mio-cli.tgz
+mio init
+```
+
+To run it once without installing, use the versioned URL from the
+[release page](https://github.com/johnatanunessouza/mio/releases/latest):
+
+```sh
+npx https://github.com/johnatanunessouza/mio/releases/download/vX.Y.Z/mio-cli-X.Y.Z.tgz init
+```
+
+Pass `npx` the versioned URL, not the `latest` one: `npx` keys its cache on the spec
+it is given, so a URL that never changes keeps running the first version it ever
+fetched — `--ignore-existing` does not help. `npm install -g` re-resolves every time.
+To make `npx` track the newest release anyway, vary the spec with a throwaway query
+string, which the download route ignores:
+
+```sh
+npx "https://github.com/johnatanunessouza/mio/releases/latest/download/mio-cli.tgz?cb=$(date +%s)" init
+```
+
+Node.js >= 20.19.0 is required.
+
+### Update checks
+
+`mio` looks for a newer release once a day and prints the install command for it
+after the command you ran:
+
+```
+  Update available 1.11.0 → 1.12.0
+  Update with npm install -g https://github.com/…/mio-cli-1.12.0.tgz
+```
+
+The lookup never runs in the foreground. Each invocation reports what the previous
+check found, and hands the next one to a detached process, so a slow or unreachable
+GitHub cannot delay or break a command. The result is cached in
+`$XDG_CACHE_HOME/mio-cli/update-check.json` (`~/.cache/…` by default).
+
+The notice only appears on a terminal, never in piped output. To switch it off, pass
+`--no-update-check`, or set `MIO_NO_UPDATE_NOTIFIER=1` (`NO_UPDATE_NOTIFIER=1` is
+honoured too). It is off in CI by default.
+
+## Run from a clone
 
 ```sh
 pnpm install
@@ -94,6 +145,19 @@ The catalog lives in `src/core/agents/registry.ts`; target paths are isolated in
 `src/core/agents/paths.ts`. The `skills/` and `.agents/skills/` directories are
 neutral extension boundaries for future local functionality, not distributable
 OpenSpec workflow payloads.
+
+## Releasing
+
+Releases are cut by hand, never on push. Land a changeset with the change
+(`pnpm changeset`), then run the **Release** workflow from the repository's Actions
+tab. It lints, builds, tests, consumes the pending changesets to bump the version,
+packs the tarball, installs it from outside the repository to check the shipped
+binary runs, commits the bump, tags it, and publishes the tarball as a GitHub
+Release asset with the install command in the notes.
+
+The workflow refuses to run when no changeset is pending, and when the resulting tag
+already exists. Its `dry_run` input performs everything up to packing and attaches
+the tarball to the workflow run without committing, tagging or publishing.
 
 ## Attribution
 

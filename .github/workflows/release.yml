@@ -1,0 +1,220 @@
+name: Release
+
+# Manual only. Run it from the Actions tab ("Run workflow") when a release is due.
+# It consumes the pending changesets, packs the CLI and publishes the tarball as a
+# GitHub Release asset — no npm registry involved. Users install with:
+#   npx https://github.com/<owner>/<repo>/releases/download/vX.Y.Z/mio-cli-X.Y.Z.tgz
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Build, test and pack only — do not commit, tag or publish
+        type: boolean
+        default: false
+      prerelease:
+        description: Mark the GitHub Release as a pre-release
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Pack and publish a GitHub Release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # The version comes from the changesets, so refuse to release without one
+      # instead of re-tagging the version that is already out.
+      - name: Require a pending changeset
+        run: |
+          pending=$(find .changeset -maxdepth 1 -name '*.md' ! -name 'README.md' | wc -l)
+          if [ "$pending" -eq 0 ]; then
+            echo "::error::No pending changeset in .changeset/. Run 'pnpm changeset', commit it, then release."
+            exit 1
+          fi
+          echo "$pending pending changeset(s)."
+
+      # Read them before 'changeset version' deletes them: the summaries are the
+      # human-written part of the release notes.
+      - name: Collect the changeset summaries
+        run: |
+          cat > "$RUNNER_TEMP/collect-summaries.mjs" <<'NODE'
+          import { readdirSync, readFileSync, writeFileSync } from 'node:fs';
+          import { join } from 'node:path';
+
+          const summaries = [];
+          for (const file of readdirSync('.changeset').sort()) {
+            if (!file.endsWith('.md') || file === 'README.md') continue;
+            const raw = readFileSync(join('.changeset', file), 'utf8');
+            const body = raw.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, '').trim();
+            if (body) summaries.push(body);
+          }
+          writeFileSync(process.env.SUMMARY_FILE, `${summaries.join('\n\n---\n\n')}\n`);
+          NODE
+          SUMMARY_FILE="$RUNNER_TEMP/changeset-summaries.md" node "$RUNNER_TEMP/collect-summaries.mjs"
+          cat "$RUNNER_TEMP/changeset-summaries.md"
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Build and test
+        run: pnpm test
+
+      - name: Apply the changeset version bump
+        run: pnpm exec changeset version
+
+      - name: Resolve the release version
+        id: release
+        run: |
+          version=$(node -p "require('./package.json').version")
+          {
+            echo "version=$version"
+            echo "tag=v$version"
+          } >> "$GITHUB_OUTPUT"
+          echo "Releasing v$version."
+
+      - name: Verify the tag is free
+        run: |
+          tag='${{ steps.release.outputs.tag }}'
+          if git rev-parse -q --verify "refs/tags/$tag" >/dev/null \
+            || git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
+            echo "::error::Tag $tag already exists — the pending changesets bump to a version that was already released."
+            exit 1
+          fi
+
+      - name: Pack the tarball
+        id: pack
+        run: |
+          mkdir -p "$RUNNER_TEMP/release"
+          pnpm pack --pack-destination "$RUNNER_TEMP/release"
+          tarball=$(ls "$RUNNER_TEMP/release"/*.tgz)
+          # A second, version-less copy of the same tarball. Its name is stable across
+          # releases, which is what makes /releases/latest/download/<name> resolve to
+          # whatever the newest release is.
+          latest="$RUNNER_TEMP/release/$(node -p "require('./package.json').name").tgz"
+          cp "$tarball" "$latest"
+          {
+            echo "tarball=$tarball"
+            echo "asset=$(basename "$tarball")"
+            echo "latest_tarball=$latest"
+            echo "latest_asset=$(basename "$latest")"
+          } >> "$GITHUB_OUTPUT"
+
+      # Install the artifact the way a user will, from outside the repo, and make
+      # sure the shipped bin actually runs.
+      - name: Smoke test the packed CLI
+        run: |
+          work=$(mktemp -d)
+          cd "$work"
+          npm init -y >/dev/null
+          npm install --no-audit --no-fund --silent '${{ steps.pack.outputs.tarball }}'
+          actual=$("$work/node_modules/.bin/mio" --version)
+          expected='${{ steps.release.outputs.version }}'
+          if [ "$actual" != "$expected" ]; then
+            echo "::error::Packed CLI reports version $actual, expected $expected."
+            exit 1
+          fi
+          "$work/node_modules/.bin/mio" --help >/dev/null
+          echo "Packed CLI runs and reports $actual."
+
+      - name: Upload the tarball as a workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.pack.outputs.asset }}
+          path: ${{ steps.pack.outputs.tarball }}
+          if-no-files-found: error
+
+      - name: Compose the release notes
+        env:
+          DOWNLOAD_URL: https://github.com/${{ github.repository }}/releases/download/${{ steps.release.outputs.tag }}/${{ steps.pack.outputs.asset }}
+          LATEST_URL: https://github.com/${{ github.repository }}/releases/latest/download/${{ steps.pack.outputs.latest_asset }}
+        run: |
+          {
+            echo '## Install'
+            echo
+            echo 'Run it straight from this release — no npm registry, no clone:'
+            echo
+            echo '```sh'
+            echo "npx $DOWNLOAD_URL init"
+            echo '```'
+            echo
+            echo 'Or install the CLI on the machine. This URL always resolves to the newest'
+            echo 'release, so re-running it upgrades:'
+            echo
+            echo '```sh'
+            echo "npm install -g $LATEST_URL"
+            echo 'mio --help'
+            echo '```'
+            echo
+            echo 'Requires Node.js >= 20.19.0.'
+            echo
+            echo '## Changes'
+            echo
+            cat "$RUNNER_TEMP/changeset-summaries.md"
+          } > "$RUNNER_TEMP/release-notes.md"
+
+      - name: Commit the version bump and tag it
+        if: ${{ !inputs.dry_run }}
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A package.json CHANGELOG.md .changeset
+          git commit -m 'chore(release): ${{ steps.release.outputs.tag }}'
+          git tag -a '${{ steps.release.outputs.tag }}' -m '${{ steps.release.outputs.tag }}'
+          git push origin 'HEAD:${{ github.ref_name }}'
+          git push origin '${{ steps.release.outputs.tag }}'
+
+      - name: Create the GitHub Release
+        if: ${{ !inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create '${{ steps.release.outputs.tag }}' \
+            '${{ steps.pack.outputs.tarball }}' \
+            '${{ steps.pack.outputs.latest_tarball }}' \
+            --title '${{ steps.release.outputs.tag }}' \
+            --notes-file "$RUNNER_TEMP/release-notes.md" \
+            --generate-notes \
+            ${{ inputs.prerelease && '--prerelease' || '' }}
+
+      - name: Summarize the run
+        if: ${{ always() && steps.pack.outcome == 'success' }}
+        env:
+          DOWNLOAD_URL: https://github.com/${{ github.repository }}/releases/download/${{ steps.release.outputs.tag }}/${{ steps.pack.outputs.asset }}
+        run: |
+          {
+            if [ '${{ inputs.dry_run }}' = 'true' ]; then
+              echo '### Dry run — ${{ steps.release.outputs.tag }}'
+              echo
+              echo 'Nothing was committed, tagged or published. The tarball is attached to this run as an artifact.'
+            else
+              echo '### Released ${{ steps.release.outputs.tag }}'
+              echo
+              echo '```sh'
+              echo "npx $DOWNLOAD_URL init"
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
