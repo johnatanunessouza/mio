@@ -1,8 +1,14 @@
-import baseline from '../../../../openspec/changes/archive/2026-08-27-extract-generic-cli-skeleton/baselines/agent-catalog.json';
+import baseline from '../../fixtures/agent-catalog-baseline.json';
 import { describe, expect, it } from 'vitest';
 import { AGENT_ALIASES, listAgents, resolveAgentId, resolveAgents } from '../../../src/core/agents/registry.js';
 
 /**
+ * `agent-catalog-baseline.json` is a byte-for-byte copy of the baseline recorded by
+ * the archived `extract-generic-cli-skeleton` change. It is vendored here because
+ * the archive lives in the surrounding workspace, not in this repository, and a
+ * test suite that only passes on a machine with that workspace checked out cannot
+ * run in CI. The archive stays the source of truth; refresh this copy from it.
+ *
  * Deliberate departures from the archived baseline. The baseline records what
  * the catalog held when it was extracted, so it stays as written; a fix that
  * post-dates it is declared here instead of rewriting the archive.
