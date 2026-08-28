@@ -144,17 +144,20 @@ async function install(context: ToolInstallContext): Promise<ToolInstallStep[]> 
     steps.push(...await writeCopilotMcpConfig(context.projectRoot, binaryPath ?? definition.binary, context.dryRun));
   }
 
+  // A dry run reports the plan, not the state of this machine: the install step
+  // above already said it would install codegraph, so indexing is what follows
+  // whether or not the binary happens to be here.
+  if (context.dryRun) {
+    steps.push({ label: 'index project', status: 'skipped', detail: 'dry run: would run `codegraph init`' });
+    return steps;
+  }
+
   if (!binaryPath) {
     steps.push({
       label: 'index project',
       status: 'skipped',
-      detail: context.dryRun ? 'dry run' : 'codegraph unavailable — run `codegraph init` once it is installed',
+      detail: 'codegraph unavailable — run `codegraph init` once it is installed',
     });
-    return steps;
-  }
-
-  if (context.dryRun) {
-    steps.push({ label: 'index project', status: 'skipped', detail: 'dry run: would run `codegraph init`' });
     return steps;
   }
 
